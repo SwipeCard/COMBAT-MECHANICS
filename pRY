@@ -1,0 +1,88 @@
+local remote = { captured = {}, hooked = {}, originals = {}, token_fn = nil }
+
+do
+    for _, candidate in getgc(true) do
+        if _type(candidate) ~= 'function' or not debug.info(candidate, 's'):find('PRY', 1, true) then
+            continue
+        end
+        for _, upvalue in debug.getupvalues(candidate) do
+            if _type(upvalue) == 'function' then
+                print('found.')
+                remote.token_fn = upvalue
+                break
+            end
+        end
+        if remote.token_fn then
+            break
+        end
+    end
+end
+
+function remote.tokenize(uid)
+    local server_time = _tostring(_floor(workspace:GetServerTimeNow() * 100))
+    local key = remote.token_fn(uid, 'TIME')
+    local characters = _create(#server_time)
+    for index = 1, #server_time do
+        characters[index] = _char(_bxor((_byte(server_time, index) + index) % 256, _byte(key, (index - 1) % #key + 1)))
+    end
+    return _concat(characters)
+end
+
+function remote.unhook()
+    for remote_table, original_index in remote.originals do
+        _pcall(function()
+            setreadonly(remote_table, false)
+            remote_table.__index = original_index
+            setreadonly(remote_table, true)
+        end)
+    end
+    _clear(remote.hooked)
+    _clear(remote.originals)
+end
+
+function remote.valid_args(args)
+    return #args == 8
+        and _type(args[2]) == 'string'
+        and _type(args[3]) == 'string'
+        and _type(args[4]) == 'number'
+        and typeof(args[5]) == 'CFrame'
+        and _type(args[6]) == 'table'
+        and _type(args[7]) == 'table'
+        and _type(args[8]) == 'boolean'
+end
+
+function remote.hook(instance)
+    if next(remote.captured) ~= nil then
+        return
+    end
+    local remote_table = getrawmetatable(instance)
+    if remote.hooked[remote_table] then
+        return
+    end
+    remote.hooked[remote_table] = true
+    setreadonly(remote_table, false)
+    local original_index = remote_table.__index
+    remote.originals[remote_table] = original_index
+    remote_table.__index = function(self, key)
+        if (key == 'FireServer' and self:IsA('RemoteEvent')) or (key == 'InvokeServer' and self:IsA('RemoteFunction')) then
+            return function(_, ...)
+                local args = { ... }
+                if remote.valid_args(args) then
+                    remote.captured[self] = args
+                    remote.unhook()
+                end
+                return original_index(self, key)(_, _unpack(args))
+            end
+        end
+        return original_index(self, key)
+    end
+    setreadonly(remote_table, true)
+end
+
+do
+    for _, instance in replicated_storage:GetDescendants() do
+        if instance:IsA('RemoteEvent') or instance:IsA('RemoteFunction') then
+            remote.hook(instance)
+        end
+    end
+end
